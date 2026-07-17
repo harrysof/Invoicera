@@ -1,0 +1,8 @@
+# Verified installing cleanly together (pip check: "No broken requirements found")
+# in a fresh venv here. paddlepaddle is pinned to 3.0.0 specifically because
+# that's the version PaddleOCR's own team used in their tested PyInstaller
+# packaging recipe -- see README before bumping it.
+paddlepaddle==3.0.0
+paddleocr[doc-parser]==3.7.0
+PyMuPDF
+Pillow

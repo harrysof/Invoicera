@@ -25,6 +25,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from ocr_pipeline import process_pdf, combined_markdown
+from extract_fields import extract
+from export_excel import build_workbook
 
 
 class InvoiceraOCRApp:
@@ -34,7 +36,8 @@ class InvoiceraOCRApp:
         self.root.geometry("900x650")
 
         self.selected_paths = []   # list of PDF file paths queued for processing
-        self.results = {}          # filename -> pipeline result dict
+        self.results = {}          # filename -> pipeline result dict (OCR stage)
+        self.extraction_results = {}  # filename -> extract_fields.extract() result
         self.output_dir = None
 
         self._build_ui()
@@ -83,6 +86,7 @@ class InvoiceraOCRApp:
         ttk.Button(bottom_frame, text="Save Selected as .md", command=lambda: self.save_selected("md")).pack(side=tk.LEFT, padx=5)
         ttk.Button(bottom_frame, text="Save All as .json", command=lambda: self.save_all("json")).pack(side=tk.LEFT, padx=5)
         ttk.Button(bottom_frame, text="Save All as .md", command=lambda: self.save_all("md")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom_frame, text="Extract Fields -> Excel", command=self.run_extraction).pack(side=tk.LEFT, padx=(20, 5))
 
     # ------------------------------------------------------------------
     # File selection
@@ -158,6 +162,72 @@ class InvoiceraOCRApp:
         if self.file_listbox.size() > 0:
             self.file_listbox.selection_set(0)
             self.on_file_select(None)
+
+    # ------------------------------------------------------------------
+    # Field extraction (qwen33b via Ollama) + Excel export
+    # ------------------------------------------------------------------
+    def run_extraction(self):
+        # Only consider files that actually OCR'd successfully -- an
+        # "error" result has no markdown to extract from.
+        ocr_ok = {fn: r for fn, r in self.results.items() if "error" not in r}
+
+        if not ocr_ok:
+            messagebox.showwarning("Nothing to extract", "Run OCR successfully on at least one file first.")
+            return
+
+        out_dir = self._get_output_dir()
+        if out_dir is None:
+            return
+
+        self.progress["maximum"] = len(ocr_ok)
+        self.progress["value"] = 0
+        self.status_label.config(text="Extracting fields via qwen33b... (this calls Ollama per file)")
+
+        thread = threading.Thread(target=self._run_extraction_worker, args=(ocr_ok, out_dir), daemon=True)
+        thread.start()
+
+    def _run_extraction_worker(self, ocr_ok, out_dir):
+        for i, (filename, ocr_result) in enumerate(ocr_ok.items(), start=1):
+            try:
+                doc_markdown = combined_markdown(ocr_result)
+                extraction = extract(doc_markdown, source_file=filename)
+            except Exception as e:
+                # Same principle as OCR: one bad file (e.g. Ollama down,
+                # bad JSON from the model) shouldn't kill the whole batch.
+                error_trace = traceback.format_exc()
+                extraction = {
+                    "source_file": filename,
+                    "is_invoice": None,
+                    "document_type": "EXTRACTION_ERROR",
+                    "fields": {},
+                    "needs_review": True,
+                    "review_reasons": [f"Extraction failed: {e}"],
+                    "raw_model_response": error_trace,
+                }
+            self.extraction_results[filename] = extraction
+            self.root.after(0, self._update_progress, i, filename)
+
+        try:
+            xlsx_path = out_dir / "invoices_output.xlsx"
+            build_workbook(list(self.extraction_results.values()), str(xlsx_path))
+            self.root.after(0, self._on_extraction_complete, str(xlsx_path), None)
+        except Exception as e:
+            self.root.after(0, self._on_extraction_complete, None, str(e))
+
+    def _on_extraction_complete(self, xlsx_path, error):
+        review_count = sum(1 for r in self.extraction_results.values() if r.get("needs_review"))
+        total = len(self.extraction_results)
+
+        if error:
+            self.status_label.config(text=f"Extraction done, but Excel export failed: {error}")
+            messagebox.showerror("Excel export failed", error)
+            return
+
+        self.status_label.config(text=f"Extracted {total} file(s), {review_count} need review. Saved to {xlsx_path}")
+        messagebox.showinfo(
+            "Extraction complete",
+            f"Processed {total} file(s).\n{review_count} row(s) flagged for review.\n\nSaved: {xlsx_path}",
+        )
 
     # ------------------------------------------------------------------
     # Display

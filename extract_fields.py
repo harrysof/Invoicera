@@ -239,6 +239,14 @@ def call_ollama(prompt: str, model: str = MODEL_NAME, url: str = OLLAMA_URL, tim
         "model": model,
         "prompt": prompt,
         "stream": False,
+        "think": False,  # Qwen3 models (like this one, confirmed via `ollama show`)
+                          # default to emitting a long <think>...</think> reasoning
+                          # block before the real answer. That's almost certainly
+                          # what caused the timeouts -- not context size (this
+                          # model's context length is 262144, nowhere near our
+                          # num_ctx=8192). Disabling it here makes it answer
+                          # directly, which is both faster and what we want for
+                          # a deterministic extraction task anyway.
         "options": OLLAMA_OPTIONS,
     }
     data = json.dumps(payload).encode("utf-8")
@@ -275,8 +283,16 @@ def call_ollama(prompt: str, model: str = MODEL_NAME, url: str = OLLAMA_URL, tim
 
 
 def _strip_json_fences(text: str) -> str:
-    """Ollama models sometimes wrap JSON in ```json fences despite instructions not to. Strip if present."""
+    """Ollama models sometimes wrap JSON in ```json fences despite instructions not to. Strip if present.
+
+    Also strips a leaked <think>...</think> block as a defensive fallback --
+    we pass think=False in the request, but if that's ever not honored
+    (older Ollama version, model quirk), we don't want a parse failure to
+    be the only symptom.
+    """
     text = text.strip()
+    if "<think>" in text and "</think>" in text:
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
